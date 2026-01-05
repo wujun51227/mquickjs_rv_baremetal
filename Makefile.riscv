@@ -6,6 +6,21 @@
 #CONFIG_ASAN=y
 #CONFIG_GPROF=y
 CONFIG_SMALL=y
+
+# RISC-V baremetal configuration
+ifdef CONFIG_RISCV64_BAREMETAL
+CROSS_PREFIX=riscv64-unknown-elf-
+STD_CFG=
+BAREMETAL=y
+HEAP_SIZE?=16384
+endif
+
+ifdef CONFIG_RISCV32_BAREMETAL
+CROSS_PREFIX=riscv64-unknown-elf-
+BAREMETAL=y
+STD_CFG=-m32
+HEAP_SIZE?=16384
+endif
 # consider warnings as errors (for development)
 #CONFIG_WERROR=y
 
@@ -27,7 +42,7 @@ endif
 
 HOST_CC=gcc
 CC=$(CROSS_PREFIX)gcc
-CFLAGS=-Wall -g -MMD -D_GNU_SOURCE -fno-math-errno -fno-trapping-math
+CFLAGS=-Wall -MMD -D_GNU_SOURCE -fno-math-errno -fno-trapping-math
 HOST_CFLAGS=-Wall -g -MMD -D_GNU_SOURCE -fno-math-errno -fno-trapping-math
 ifdef CONFIG_WERROR
 CFLAGS+=-Werror
@@ -46,8 +61,27 @@ ifdef CONFIG_SOFTFLOAT
 CFLAGS+=-msoft-float
 CFLAGS+=-DUSE_SOFTFLOAT
 endif # CONFIG_SOFTFLOAT
+
+ifdef CONFIG_RISCV64_BAREMETAL
+CFLAGS+=-march=rv64imac -mabi=lp64 -mstrict-align -mcmodel=medany
+CFLAGS+=-ffreestanding -nostdlib -fno-builtin
+CFLAGS+=-DUSE_SOFTFLOAT
+CFLAGS+=-DHEAP_SIZE=$(HEAP_SIZE)
+LDFLAGS+=-nostdlib -nostartfiles -Wl,-T,./riscv/riscv64_baremetal.ld
+LDFLAGS+=-Wl,--defsym=__heap_size=$(HEAP_SIZE)
+endif # CONFIG_RISCV64_BAREMETAL
+
+ifdef CONFIG_RISCV32_BAREMETAL
+CFLAGS+=-march=rv32imac -mabi=ilp32 -mstrict-align -mcmodel=medany
+CFLAGS+=-ffreestanding -nostdlib -fno-builtin
+CFLAGS+=-DUSE_SOFTFLOAT
+CFLAGS+=-DHEAP_SIZE=$(HEAP_SIZE)
+LDFLAGS+=-nostdlib -nostartfiles -Wl,-T,./riscv/riscv32_baremetal.ld
+LDFLAGS+=-Wl,--defsym=__heap_size=$(HEAP_SIZE)
+endif # CONFIG_RISCV32_BAREMETAL
+
 HOST_CFLAGS+=-O2
-LDFLAGS=-g
+#LDFLAGS+=-g
 HOST_LDFLAGS=-g
 ifdef CONFIG_GPROF
 CFLAGS+=-p
@@ -76,15 +110,44 @@ MQJS_BUILD_FLAGS=-m32
 endif
 
 PROGS=mqjs$(EXE) example$(EXE)
-TEST_PROGS=dtoa_test libm_test 
+TEST_PROGS=dtoa_test libm_test
+
+ifdef CONFIG_RISCV64_BAREMETAL
+PROGS=mqjs_baremetal.elf
+endif 
+
+ifdef CONFIG_RISCV32_BAREMETAL
+PROGS=mqjs_baremetal.elf
+endif 
 
 all: $(PROGS)
 
 MQJS_OBJS=mqjs.o readline_tty.o readline.o mquickjs.o dtoa.o libm.o cutils.o
 LIBS=-lm
 
+ifdef BAREMETAL
+ifdef CONFIG_RISCV64_BAREMETAL
+MQJS_BAREMETAL_OBJS=./riscv/mqjs_baremetal.o ./riscv/baremetal_syscall_rv64.o mquickjs.o dtoa.o libm.o cutils.o ./riscv/start_riscv64.o
+endif
+ifdef CONFIG_RISCV32_BAREMETAL
+MQJS_BAREMETAL_OBJS=./riscv/mqjs_baremetal.o ./riscv/baremetal_syscall_rv32.o mquickjs.o dtoa.o libm.o cutils.o ./riscv/start_riscv32.o
+endif
+else
+MQJS_BAREMETAL_OBJS=
+endif
+
 mqjs$(EXE): $(MQJS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+ifdef CONFIG_RISCV64_BAREMETAL
+mqjs_baremetal.elf: mqjs_stdlib.h $(MQJS_BAREMETAL_OBJS) ./riscv/riscv64_baremetal.ld
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(MQJS_BAREMETAL_OBJS) 
+endif
+
+ifdef CONFIG_RISCV32_BAREMETAL
+mqjs_baremetal.elf: mqjs_stdlib.h $(MQJS_BAREMETAL_OBJS) ./riscv/shift_rv32.o ./riscv/riscv32_baremetal.ld
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(MQJS_BAREMETAL_OBJS) ./riscv/shift_rv32.o
+endif
 
 mquickjs.o: mquickjs_atom.h
 
@@ -92,10 +155,10 @@ mqjs_stdlib: mqjs_stdlib.host.o mquickjs_build.host.o
 	$(HOST_CC) $(HOST_LDFLAGS) -o $@ $^
 
 mquickjs_atom.h: mqjs_stdlib
-	./mqjs_stdlib -a $(MQJS_BUILD_FLAGS) > $@
+	./mqjs_stdlib $(STD_CFG) -a $(MQJS_BUILD_FLAGS) > $@
 
 mqjs_stdlib.h: mqjs_stdlib
-	./mqjs_stdlib $(MQJS_BUILD_FLAGS) > $@
+	./mqjs_stdlib $(STD_CFG) $(MQJS_BUILD_FLAGS) > $@
 
 mqjs.o: mqjs_stdlib.h
 
@@ -112,6 +175,9 @@ example_stdlib.h: example_stdlib
 	./example_stdlib $(MQJS_BUILD_FLAGS) > $@
 
 %.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+%.o: %.s
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 %.host.o: %.c
@@ -147,6 +213,6 @@ rempio2_test: tests/rempio2_test.o libm.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 clean:
-	rm -f *.o *.d *~ tests/*.o tests/*.d tests/*~ test_builtin.bin mqjs_stdlib mqjs_stdlib.h mquickjs_build_atoms mquickjs_atom.h mqjs_example example_stdlib example_stdlib.h $(PROGS) $(TEST_PROGS)
+	rm -f riscv/*.o riscv/*.d *.o *.d *~ tests/*.o tests/*.d tests/*~ test_builtin.bin mqjs_stdlib mqjs_stdlib.h mquickjs_build_atoms mquickjs_atom.h mqjs_example example_stdlib example_stdlib.h $(PROGS) $(TEST_PROGS) mqjs_baremetal.elf
 
 -include $(wildcard *.d)

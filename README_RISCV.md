@@ -45,10 +45,10 @@ make
 
 ```bash
 # Clean previous build
-make clean
+make -f Makefile.riscv clean
 
 # Build 64-bit baremetal version
-make CONFIG_RISCV64_BAREMETAL=y
+make -f Makefile.riscv CONFIG_RISCV64_BAREMETAL=y
 
 # Output file: mqjs_baremetal.elf
 ```
@@ -57,10 +57,10 @@ make CONFIG_RISCV64_BAREMETAL=y
 
 ```bash
 # Clean previous build
-make clean
+make -f Makefile.riscv clean
 
 # Build 32-bit baremetal version
-make CONFIG_RISCV32_BAREMETAL=y
+make -f Makefile.riscv CONFIG_RISCV32_BAREMETAL=y
 
 # Output file: mqjs_baremetal.elf
 ```
@@ -141,8 +141,8 @@ HEAP_SIZE = 32768  # 32 KB
 Then rebuild:
 
 ```bash
-make clean
-make CONFIG_RISCV64_BAREMETAL=y
+make -f Makefile.riscv clean
+make -f Makefile.riscv CONFIG_RISCV64_BAREMETAL=y
 ```
 
 ## System Call Implementation
@@ -262,7 +262,7 @@ Or increase heap size in the Makefile.
 
 ```bash
 # Enable code size optimization
-make CONFIG_RISCV64_BAREMETAL=y CONFIG_SMALL=y
+make -f Makefile.riscv CONFIG_RISCV64_BAREMETAL=y CONFIG_SMALL=y
 ```
 
 ### Compiler Optimization
