@@ -272,15 +272,7 @@ int main(int argc, char **argv)
 #ifdef HEAP_SIZE
     mem_size = HEAP_SIZE;
 #else
-#ifdef __riscv_xlen
-#if __riscv_xlen == 32
-    mem_size = 4*1024*1024; /* 4 MB for 32-bit */
-#else
-    mem_size = 8*1024; /* 8 KB for 64-bit */
-#endif
-#else
-    mem_size = 8*1024; /* 8 KB default */
-#endif
+    mem_size = 16*1024; /* 16 KB default */
 #endif
     mem_buf = (uint8_t *)__heap_start;
 
