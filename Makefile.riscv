@@ -16,7 +16,7 @@ HEAP_SIZE?=16384
 endif
 
 ifdef CONFIG_RISCV32_BAREMETAL
-CROSS_PREFIX=riscv64-unknown-elf-
+CROSS_PREFIX=riscv32-unknown-elf-
 BAREMETAL=y
 STD_CFG=-m32
 HEAP_SIZE?=16384
@@ -72,7 +72,7 @@ LDFLAGS+=-Wl,--defsym=__heap_size=$(HEAP_SIZE)
 endif # CONFIG_RISCV64_BAREMETAL
 
 ifdef CONFIG_RISCV32_BAREMETAL
-CFLAGS+=-march=rv32imac -mabi=ilp32 -mstrict-align -mcmodel=medany
+CFLAGS+=-march=rv32imac_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany
 CFLAGS+=-ffreestanding -nostdlib -fno-builtin
 CFLAGS+=-DUSE_SOFTFLOAT
 CFLAGS+=-DHEAP_SIZE=$(HEAP_SIZE)

@@ -35,6 +35,16 @@
 #include "dtoa.h"
 #include "mquickjs_priv.h"
 
+#ifndef PRIu64
+  #if defined(_WIN32)
+    #define PRIu64 "I64u"
+  #elif defined(__x86_64__) || defined(__LP64__) || (__riscv_xlen == 64)
+    #define PRIu64 "lu"
+  #else
+    #define PRIu64 "llu"
+  #endif
+#endif
+
 /*
   TODO:
   - regexp: better error position info
