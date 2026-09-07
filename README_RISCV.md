@@ -127,8 +127,9 @@ qemu-system-riscv32 \
 
 ### Default Memory Configuration
 
-- **Heap Size**: 16 KB (16384 bytes)
-- **Total Memory**: 4 MB (QEMU configuration)
+- **Heap Size**: 16 KB (16384 bytes), placed immediately after BSS
+- **Stack**: grows down from the end of RAM (default reserved 8 KB)
+- **Total Memory**: 4 MB (QEMU `LENGTH(RAM)` / `-m 4M`)
 
 ### Modifying Heap Size
 

@@ -2,8 +2,22 @@
 OUTPUT_ARCH("riscv")
 ENTRY(_start)
 
-/* Heap size can be overridden with -Wl,--defsym,__heap_size=<size> */
-PROVIDE(__heap_size = 16M);
+/*
+ * Compact layout in a single RAM region:
+ *
+ *   ORIGIN(RAM)  .text .rodata .data .bss
+ *                __heap_start            heap grows up
+ *                __heap_end
+ *                (free)
+ *                __stack_limit
+ *   RAM end      __stack_top             C stack grows down
+ *
+ * Override with:
+ *   -Wl,--defsym,__heap_size=<n>
+ *   -Wl,--defsym,__stack_size=<n>
+ */
+PROVIDE(__heap_size = 16K);
+PROVIDE(__stack_size = 8K);
 
 MEMORY
 {
@@ -12,7 +26,7 @@ MEMORY
 
 SECTIONS
 {
-    . = 0x80000000;
+    . = ORIGIN(RAM);
 
     .text : {
         *(.text.init)
@@ -42,16 +56,20 @@ SECTIONS
         __bss_end = .;
     } > RAM
 
-    /* Export heap symbols */
-    PROVIDE(__heap_start = .);
-
-    .heap : {
+    /* Heap immediately follows BSS */
+    .heap (NOLOAD) : {
+        . = ALIGN(16);
+        PROVIDE(__heap_start = .);
         . = . + __heap_size;
         PROVIDE(__heap_end = .);
     } > RAM
 
-    /* Set stack top to end of RAM */
-    PROVIDE(__stack_top = 0x80000000 + 512K);
+    PROVIDE(__ram_end = ORIGIN(RAM) + LENGTH(RAM));
+    PROVIDE(__stack_top = __ram_end);
+    PROVIDE(__stack_limit = __stack_top - __stack_size);
 
     _end = .;
+
+    ASSERT(__heap_end <= __stack_limit,
+           "Error: heap overlaps reserved stack; increase RAM LENGTH or reduce __heap_size/__stack_size")
 }
