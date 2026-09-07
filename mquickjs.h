@@ -37,6 +37,17 @@
 #define JS_PTR64 /* pointers are 64 bit wide instead of 32 bit wide */
 #endif
 
+/* some freestanding C libraries (e.g. newlib) don't define PRIo64 */
+#ifndef PRIo64
+  #if defined(_WIN32)
+    #define PRIo64 "I64o"
+  #elif defined(__x86_64__) || defined(__LP64__) || (__riscv_xlen == 64)
+    #define PRIo64 "lo"
+  #else
+    #define PRIo64 "llo"
+  #endif
+#endif
+
 typedef struct JSContext JSContext;
 
 #ifdef JS_PTR64

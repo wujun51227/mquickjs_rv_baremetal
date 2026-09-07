@@ -228,19 +228,6 @@ JSValue js_gc(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
     return JS_UNDEFINED;
 }
 
-JSValue js_date_now(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
-{
-    // For baremetal, return a simple timestamp
-    // Since time() may not be available, we'll return a fixed value
-    return JS_NewInt32(ctx, 0);  // Return 0 since time() may not be available in baremetal
-}
-
-JSValue js_performance_now(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
-{
-    // For baremetal, return a simple timestamp
-    return JS_NewInt32(ctx, 0);  // Return 0 since time() may not be available in baremetal
-}
-
 JSValue js_load(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
 {
     // Not implemented for baremetal
