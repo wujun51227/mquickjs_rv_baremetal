@@ -323,6 +323,14 @@ typedef struct {
     int last_index;
 } JSRegExp;
 
+typedef struct
+#ifndef JS_PTR64
+__attribute__((packed)) /* unaligned 64 bit access in 32-bit mode */
+#endif
+{
+    double dval;
+} JSDate;
+
 typedef struct {
     void *opaque;
 } JSObjectUserData;
@@ -349,6 +357,7 @@ struct JSObject {
         JSArrayBuffer array_buffer;
         JSTypedArray typed_array;
         JSRegExp regexp;
+        JSDate date;
         JSObjectUserData user;
     } u;
 };
@@ -2123,11 +2132,16 @@ const char *JS_ToCString(JSContext *ctx, JSValue val, JSCStringBuf *buf)
     return JS_ToCStringLen(ctx, NULL, val, buf);
 }
 
+BOOL JS_HasException(JSContext *ctx)
+{
+    return !JS_IsUninitialized(ctx->current_exception);
+}
+
 JSValue JS_GetException(JSContext *ctx)
 {
     JSValue obj;
     obj = ctx->current_exception;
-    ctx->current_exception = JS_UNDEFINED;
+    ctx->current_exception = JS_UNINITIALIZED;
     return obj;
 }
 
@@ -3620,7 +3634,7 @@ JSContext *JS_NewContext2(void *mem_start, size_t mem_size, const JSSTDLibraryDe
     }
     
     
-    ctx->current_exception = JS_UNDEFINED;
+    ctx->current_exception = JS_UNINITIALIZED;
 #ifdef DEBUG_GC
     /* set the dummy block at the start of the memory */
     {
@@ -3662,11 +3676,12 @@ JSContext *JS_NewContext(void *mem_start, size_t mem_size, const JSSTDLibraryDef
 
 void JS_FreeContext(JSContext *ctx)
 {
-    /* call the user C finalizers */
     uint8_t *ptr;
     int size;
     JSObject *p;
     
+    /* call the user C finalizers */
+    /* XXX: could disable it when prepare_compilation = true */
     ptr = ctx->heap_base;
     while (ptr < ctx->heap_free) {
         size = get_mblock_size(ptr);
@@ -3682,6 +3697,11 @@ void JS_FreeContext(JSContext *ctx)
 void JS_SetContextOpaque(JSContext *ctx, void *opaque)
 {
     ctx->opaque = opaque;
+}
+
+void *JS_GetContextOpaque(JSContext *ctx)
+{
+    return ctx->opaque;
 }
 
 void JS_SetInterruptHandler(JSContext *ctx, JSInterruptHandler *interrupt_handler)
@@ -5592,7 +5612,7 @@ JSValue JS_Call(JSContext *ctx, int call_flags)
                             /* exception caught by a 'catch' in the
                                current function */
                             *--sp = ctx->current_exception;
-                            ctx->current_exception = JS_NULL;
+                            ctx->current_exception = JS_UNINITIALIZED;
                             byte_code = JS_VALUE_TO_PTR(b->byte_code);
                             pc = byte_code->buf + JS_VALUE_GET_SPECIAL_VALUE(val2);
                             goto restart;
@@ -12846,6 +12866,8 @@ int JS_PrepareBytecode64to32(JSContext *ctx,
 
     *pdata_buf = ctx->heap_base;
     *pdata_len = ctx->heap_free - ctx->heap_base;
+    /* ensure that JS_FreeContext() will do nothing */
+    ctx->heap_free = ctx->heap_base; 
     return 0;
 }
 #endif /* JSW == 8 */
@@ -13604,7 +13626,8 @@ JSValue js_string_toLowerCase(JSContext *ctx, JSValue *this_val,
     if (JS_IsException(*this_val))
         return *this_val;
     len = js_string_len(ctx, *this_val);
-    string_buffer_push(ctx, b, len);
+    if (string_buffer_push(ctx, b, len))
+        return JS_EXCEPTION;
     for(i = 0; i < len; i++) {
         c = string_getc(ctx, *this_val, i);
         if (to_lower) {
@@ -14326,12 +14349,17 @@ JSValue js_array_toString(JSContext *ctx, JSValue *this_val,
     return js_array_join(ctx, this_val, 0, NULL);
 }
 
+BOOL JS_IsArray(JSContext *ctx, JSValue obj)
+{
+    JSObject *p;
+    p = js_get_object_class(ctx, obj, JS_CLASS_ARRAY);
+    return (p != NULL);
+}
+
 JSValue js_array_isArray(JSContext *ctx, JSValue *this_val,
                          int argc, JSValue *argv)
 {
-    JSObject *p;
-    p = js_get_object_class(ctx, argv[0], JS_CLASS_ARRAY);
-    return JS_NewBool(p != NULL);
+    return JS_NewBool(JS_IsArray(ctx, argv[0]));
 }
 
 JSValue js_array_reverse(JSContext *ctx, JSValue *this_val,
@@ -15399,10 +15427,28 @@ JSValue js_typed_array_set(JSContext *ctx, JSValue *this_val,
 
 /* Date */
 
-JSValue js_date_constructor(JSContext *ctx, JSValue *this_val,
-                            int argc, JSValue *argv)
+JSValue JS_NewDate(JSContext *ctx, double epoch_ms)
 {
-    return JS_ThrowTypeError(ctx, "only Date.now() is supported");
+    JSValue obj;
+    JSObject *p;
+    obj = JS_NewObjectClass(ctx, JS_CLASS_DATE, sizeof(JSDate));
+    if (JS_IsException(obj))
+        return obj;
+    p = JS_VALUE_TO_PTR(obj);
+    p->u.date.dval = epoch_ms;
+    return obj;
+}
+
+JSValue js_date_valueOf(JSContext *ctx, JSValue *this_val,
+                        int argc, JSValue *argv)
+{
+    JSObject *p;
+    p = js_get_object_class(ctx, *this_val, JS_CLASS_DATE);
+    if (!p) {
+        JS_ThrowTypeError(ctx, "not a Date object");
+        return JS_EXCEPTION;
+    }
+    return __JS_NewFloat64(ctx, p->u.date.dval);
 }
 
 /* global */
