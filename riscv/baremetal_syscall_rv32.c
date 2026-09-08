@@ -35,10 +35,14 @@ struct timezone {
     int tz_dsttime;
 };
 
-/* Simple putchar for QEMU virt machine */
+/* UART16550 base address, overridable via CFLAGS (QEMU virt default) */
+#ifndef UART_BASE_ADDR
+#define UART_BASE_ADDR 0x10000000
+#endif
+
+/* Simple putchar */
 void putchar(char c) {
-    /* Use UART16550 at 0x10000000 for QEMU virt machine */
-    volatile char *uart = (volatile char *)0x10000000;
+    volatile char *uart = (volatile char *)UART_BASE_ADDR;
     *uart = c;
 }
 

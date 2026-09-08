@@ -86,6 +86,13 @@ ifdef BAREMETAL
 CFLAGS+=-DMCOUNTER_FREQ_HZ=$(MCOUNTER_FREQ_HZ)
 endif
 
+# UART16550 base address for baremetal console output.
+#   Default 0x10000000 (QEMU virt machine); e.g. make ... UART_BASE_ADDR=0x20000000
+UART_BASE_ADDR ?= 0x10000000
+ifdef BAREMETAL
+CFLAGS+=-DUART_BASE_ADDR=$(UART_BASE_ADDR)
+endif
+
 # Host-compile test_code.js to bytecode.
 #   Embedded:  CONFIG_BYTECODE=y
 #   Mailbox:   CONFIG_BYTECODE_WAIT=y   (implies CONFIG_BYTECODE)
@@ -198,6 +205,10 @@ ifdef CONFIG_RISCV32_BAREMETAL
 mqjs_baremetal.elf: mqjs_stdlib.h $(MQJS_BAREMETAL_OBJS) ./riscv/shift_rv32.o ./riscv/riscv32_baremetal.ld
 	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(MQJS_BAREMETAL_OBJS) ./riscv/shift_rv32.o
 endif
+
+# mqjs_baremetal.c includes the generated mqjs_stdlib.h; without this rule a
+# clean parallel build compiles the object before the header is generated.
+riscv/mqjs_baremetal.o: mqjs_stdlib.h
 
 mquickjs.o: mquickjs_atom.h
 
