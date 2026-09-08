@@ -17,6 +17,8 @@ ENTRY(_start)
  *   -Wl,--defsym,__stack_size=<n>
  */
 PROVIDE(__heap_size = 16K);
+PROVIDE(__jsbytecode_addr = 0x80100000);
+PROVIDE(__jsbytecode_size = 0);
 PROVIDE(__stack_size = 8K);
 
 MEMORY
@@ -64,6 +66,18 @@ SECTIONS
         PROVIDE(__heap_end = .);
     } > RAM
 
+    /* Bytecode / mailbox slot.
+       Embedded CONFIG_BYTECODE: KEEP the .incbin image.
+       CONFIG_BYTECODE_WAIT: no image, __jsbytecode_size reserves a NOBITS slot
+       at --section-start=.jsbytecode=<addr> for a later loader. */
+    .jsbytecode : ALIGN(8) {
+        PROVIDE(__jsbytecode_start = .);
+        KEEP(*(.jsbytecode))
+        . = ALIGN(8);
+        . = . + __jsbytecode_size;
+        PROVIDE(__jsbytecode_end = .);
+    } > RAM
+
     PROVIDE(__ram_end = ORIGIN(RAM) + LENGTH(RAM));
     PROVIDE(__stack_top = __ram_end);
     PROVIDE(__stack_limit = __stack_top - __stack_size);
@@ -72,4 +86,8 @@ SECTIONS
 
     ASSERT(__heap_end <= __stack_limit,
            "Error: heap overlaps reserved stack; increase RAM LENGTH or reduce __heap_size/__stack_size")
+    ASSERT(SIZEOF(.jsbytecode) == 0 || __heap_end <= __jsbytecode_addr,
+           "Error: heap overlaps jsbytecode; increase JSBYTECODE_ADDR or reduce HEAP_SIZE")
+    ASSERT(SIZEOF(.jsbytecode) == 0 || (__jsbytecode_addr + SIZEOF(.jsbytecode)) <= __stack_limit,
+           "Error: jsbytecode overlaps reserved stack")
 }

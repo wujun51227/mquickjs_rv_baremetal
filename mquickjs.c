@@ -12875,7 +12875,43 @@ int JS_PrepareBytecode64to32(JSContext *ctx,
 BOOL JS_IsBytecode(const uint8_t *buf, size_t buf_len)
 {
     const JSBytecodeHeader *hdr = (const JSBytecodeHeader *)buf;
-    return (buf_len >= sizeof(*hdr) && hdr->magic == JS_BYTECODE_MAGIC);
+    return (buf != NULL && buf_len >= sizeof(*hdr) &&
+            hdr->magic == JS_BYTECODE_MAGIC &&
+            hdr->version == JS_BYTECODE_VERSION);
+}
+
+/* Return the complete bytecode image length, or -1 if it is malformed. */
+int JS_GetBytecodeLength(const uint8_t *buf, size_t max_len)
+{
+    const uint8_t *ptr, *p_end;
+    int size, mtag;
+
+    if (!JS_IsBytecode(buf, max_len))
+        return -1;
+    ptr = buf + sizeof(JSBytecodeHeader);
+    p_end = buf + max_len;
+    while (ptr < p_end) {
+        if ((size_t)(p_end - ptr) < sizeof(JSMemBlockHeader))
+            return -1;
+        mtag = ((const JSMemBlockHeader *)ptr)->mtag;
+        if (mtag == 0)
+            return (int)(ptr - buf);
+        switch (mtag) {
+        case JS_MTAG_FUNCTION_BYTECODE:
+        case JS_MTAG_VALUE_ARRAY:
+        case JS_MTAG_STRING:
+        case JS_MTAG_FLOAT64:
+        case JS_MTAG_BYTE_ARRAY:
+            size = get_mblock_size(ptr);
+            break;
+        default:
+            return -1;
+        }
+        if (size <= 0 || (size_t)size > (size_t)(p_end - ptr))
+            return -1;
+        ptr += size;
+    }
+    return (ptr == p_end) ? (int)(ptr - buf) : -1;
 }
 
 typedef struct {

@@ -368,6 +368,7 @@ int JS_PrepareBytecode64to32(JSContext *ctx,
 #endif
 
 JS_BOOL JS_IsBytecode(const uint8_t *buf, size_t buf_len);
+int JS_GetBytecodeLength(const uint8_t *buf, size_t max_len);
 /* Relocate the bytecode in 'buf' so that it can be executed
    later. Return 0 if OK, != 0 if error */
 int JS_RelocateBytecode(JSContext *ctx,

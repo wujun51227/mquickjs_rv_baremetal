@@ -549,12 +549,30 @@ int memcmp(const void *s1, const void *s2, size_t n) {
     return 0;
 }
 
-/* Time stubs */
+/* Time from the RISC-V cycle counter, relative to the counter origin. */
+#ifndef MCOUNTER_FREQ_HZ
+#define MCOUNTER_FREQ_HZ 10000000ULL
+#endif
+
+static uint64_t read_mcycle(void)
+{
+    uint64_t value;
+
+    __asm__ volatile ("csrr %0, mcycle" : "=r"(value));
+    return value;
+}
+
 int gettimeofday(struct timeval *tv, struct timezone *tz) {
-    if (tv) {
-        tv->tv_sec = 0;
-        tv->tv_usec = 0;
-    }
+    uint64_t cycles, sec, rem;
+
+    (void)tz;
+    if (!tv)
+        return 0;
+    cycles = read_mcycle();
+    sec = cycles / MCOUNTER_FREQ_HZ;
+    rem = cycles % MCOUNTER_FREQ_HZ;
+    tv->tv_sec = (long)sec;
+    tv->tv_usec = (long)(rem * 1000000ULL / MCOUNTER_FREQ_HZ);
     return 0;
 }
 

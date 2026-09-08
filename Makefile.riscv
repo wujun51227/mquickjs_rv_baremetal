@@ -77,8 +77,45 @@ CFLAGS+=-ffreestanding -nostdlib -fno-builtin
 CFLAGS+=-DUSE_SOFTFLOAT
 CFLAGS+=-DHEAP_SIZE=$(HEAP_SIZE)
 LDFLAGS+=-nostdlib -nostartfiles -Wl,-T,./riscv/riscv32_baremetal.ld
-LDFLAGS+=-Wl,--defsym=__heap_size=$(HEAP_SIZE)
+LDFLAGS+=-Wl,--defsym,__heap_size=$(HEAP_SIZE)
 endif # CONFIG_RISCV32_BAREMETAL
+
+# mcycle frequency in Hz; mcycle-derived time is relative, not Unix epoch time.
+MCOUNTER_FREQ_HZ ?= 10000000ULL
+ifdef BAREMETAL
+CFLAGS+=-DMCOUNTER_FREQ_HZ=$(MCOUNTER_FREQ_HZ)
+endif
+
+# Host-compile test_code.js to bytecode.
+#   Embedded:  CONFIG_BYTECODE=y
+#   Mailbox:   CONFIG_BYTECODE_WAIT=y   (implies CONFIG_BYTECODE)
+#   JSBYTECODE_ADDR ?= 0x80100000
+#   BYTECODE_WAIT_SPINS ?= 0   (0 means wait forever)
+#   CONFIG_BYTECODE_CHECKSUM ?= 1 (set to 0 to skip slot checksum)
+ifdef CONFIG_BYTECODE_WAIT
+CONFIG_BYTECODE=y
+endif
+ifdef CONFIG_BYTECODE
+CFLAGS+=-DCONFIG_BYTECODE
+ifdef CONFIG_BYTECODE_CHECKSUM
+CFLAGS+=-DCONFIG_BYTECODE_CHECKSUM=$(CONFIG_BYTECODE_CHECKSUM)
+endif
+JSBYTECODE_ADDR ?= 0x80100000
+LDFLAGS+=-Wl,--defsym,__jsbytecode_addr=$(JSBYTECODE_ADDR)
+LDFLAGS+=-Wl,--section-start=.jsbytecode=$(JSBYTECODE_ADDR)
+HOST_BUILD=host_build
+JS_TO_BC=$(HOST_BUILD)/js_to_bc
+ifdef CONFIG_RISCV32_BAREMETAL
+JS_TO_BC_FLAGS=-m32
+endif
+ifdef CONFIG_BYTECODE_WAIT
+CFLAGS+=-DCONFIG_BYTECODE_WAIT
+JSBYTECODE_SIZE ?= 8192
+BYTECODE_WAIT_SPINS ?= 0
+CFLAGS+=-DBYTECODE_WAIT_SPINS=$(BYTECODE_WAIT_SPINS)
+LDFLAGS+=-Wl,--defsym,__jsbytecode_size=$(JSBYTECODE_SIZE)
+endif
+endif # CONFIG_BYTECODE
 
 HOST_CFLAGS+=-O2
 #LDFLAGS+=-g
@@ -132,12 +169,25 @@ endif
 ifdef CONFIG_RISCV32_BAREMETAL
 MQJS_BAREMETAL_OBJS=./riscv/mqjs_baremetal.o ./riscv/baremetal_syscall_rv32.o mquickjs.o dtoa.o libm.o cutils.o ./riscv/start_riscv32.o
 endif
+ifdef CONFIG_BYTECODE
+ifndef CONFIG_BYTECODE_WAIT
+MQJS_BAREMETAL_OBJS+=riscv/jsbytecode.o
+endif
+endif
 else
 MQJS_BAREMETAL_OBJS=
 endif
 
 mqjs$(EXE): $(MQJS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+ifdef CONFIG_BYTECODE
+ifndef CONFIG_BYTECODE_WAIT
+mqjs_baremetal.elf: riscv/jsbytecode.o riscv/test_code.bin
+else
+mqjs_baremetal.elf: riscv/test_code.slot
+endif
+endif
 
 ifdef CONFIG_RISCV64_BAREMETAL
 mqjs_baremetal.elf: mqjs_stdlib.h $(MQJS_BAREMETAL_OBJS) ./riscv/riscv64_baremetal.ld
@@ -159,6 +209,47 @@ mquickjs_atom.h: mqjs_stdlib
 
 mqjs_stdlib.h: mqjs_stdlib
 	./mqjs_stdlib $(STD_CFG) $(MQJS_BUILD_FLAGS) > $@
+
+ifdef CONFIG_BYTECODE
+$(HOST_BUILD):
+	mkdir -p $(HOST_BUILD)
+
+$(HOST_BUILD)/mquickjs_atom.h: mqjs_stdlib | $(HOST_BUILD)
+	./mqjs_stdlib -a > $@
+
+$(HOST_BUILD)/mqjs_stdlib.h: mqjs_stdlib | $(HOST_BUILD)
+	./mqjs_stdlib > $@
+
+$(HOST_BUILD)/mquickjs.c: mquickjs.c | $(HOST_BUILD)
+	cp $< $@
+
+$(HOST_BUILD)/mquickjs.o: $(HOST_BUILD)/mquickjs.c $(HOST_BUILD)/mquickjs_atom.h
+	$(HOST_CC) $(HOST_CFLAGS) -I$(HOST_BUILD) -I. -c -o $@ $(HOST_BUILD)/mquickjs.c
+
+$(HOST_BUILD)/js_to_bc.o: riscv/js_to_bc.c riscv/jsbytecode_slot.h $(HOST_BUILD)/mqjs_stdlib.h
+	$(HOST_CC) $(HOST_CFLAGS) -I$(HOST_BUILD) -I. -c -o $@ riscv/js_to_bc.c
+
+$(JS_TO_BC): $(HOST_BUILD)/js_to_bc.o $(HOST_BUILD)/mquickjs.o cutils.host.o dtoa.host.o libm.host.o
+	$(HOST_CC) $(HOST_LDFLAGS) -o $@ $^ -lm
+
+riscv/test_code.bin: riscv/test_code.js $(JS_TO_BC)
+	$(JS_TO_BC) $(JS_TO_BC_FLAGS) -o $@ $<
+
+riscv/test_code.slot: riscv/test_code.bin $(JS_TO_BC)
+	$(JS_TO_BC) --wrap-slot -o $@ $<
+
+riscv/jsbytecode.s: riscv/test_code.bin
+	( echo ".section .jsbytecode, \"aw\", @progbits"; \
+	  echo ".balign 8"; \
+	  echo ".globl __jsbytecode_start"; \
+	  echo ".globl __jsbytecode_end"; \
+	  echo "__jsbytecode_start:"; \
+	  echo ".incbin \"riscv/test_code.bin\""; \
+	  echo "__jsbytecode_end:" ) > $@
+
+riscv/jsbytecode.o: riscv/jsbytecode.s
+	$(CC) $(CFLAGS) -c -o $@ -Wa,-I,riscv $<
+endif # CONFIG_BYTECODE
 
 mqjs.o: mqjs_stdlib.h
 
@@ -213,6 +304,7 @@ rempio2_test: tests/rempio2_test.o libm.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 clean:
-	rm -f riscv/*.o riscv/*.d *.o *.d *~ tests/*.o tests/*.d tests/*~ test_builtin.bin mqjs_stdlib mqjs_stdlib.h mquickjs_build_atoms mquickjs_atom.h mqjs_example example_stdlib example_stdlib.h $(PROGS) $(TEST_PROGS) mqjs_baremetal.elf
+	rm -f riscv/*.o riscv/*.d riscv/ready.bin riscv/jsbytecode.s riscv/test_code.bin riscv/test_code.slot *.o *.d *~ tests/*.o tests/*.d tests/*~ test_builtin.bin mqjs_stdlib mqjs_stdlib.h mquickjs_build_atoms mquickjs_atom.h mqjs_example example_stdlib example_stdlib.h $(PROGS) $(TEST_PROGS) mqjs_baremetal.elf
+	rm -rf host_build
 
 -include $(wildcard *.d)

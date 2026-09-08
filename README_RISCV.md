@@ -63,7 +63,42 @@ make -f Makefile.riscv clean
 make -f Makefile.riscv CONFIG_RISCV32_BAREMETAL=y
 
 # Output file: mqjs_baremetal.elf
+
+### Precompiled bytecode (optional)
+
+Default firmware still `JS_Eval()`s the embedded `test_code` source on the MCU.
+The bytecode region must be writable RAM because `JS_RelocateBytecode()` patches pointers in place.
+
+**Embedded** (`CONFIG_BYTECODE=y`): host compiles `riscv/test_code.js` and links the `.bin` into the ELF at `JSBYTECODE_ADDR` (default `0x80100000`). The MCU runs it immediately.
+
+**Mailbox / late load** (`CONFIG_BYTECODE_WAIT=y`, implies `CONFIG_BYTECODE`): the ELF only reserves a NOBITS slot of `JSBYTECODE_SIZE` (default 8192) at that address. Firmware starts first, polls a 16-byte header, then runs the image after a loader writes `riscv/test_code.slot`.
+
+Slot layout at `JSBYTECODE_ADDR`:
+
+| Offset | Field | Notes |
+|--------|-------|--------|
+| 0 | `magic` | `0x3142534A` (`JSB1`) |
+| 4 | `length` | size of the raw `.bin` |
+| 8 | `checksum` | sum of image bytes |
+| 12 | `ready` | write **last**: 0 empty, 1 ready, 2 taken, 3 done |
+| 16 | `image` | raw `test_code.bin` |
+
+```bash
+# Embedded (bin is inside the ELF)
+make -f Makefile.riscv clean
+make -f Makefile.riscv CONFIG_RISCV32_BAREMETAL=y CONFIG_BYTECODE=y
+
+# Mailbox: firmware first, bytecode later
+make -f Makefile.riscv clean
+make -f Makefile.riscv CONFIG_RISCV32_BAREMETAL=y CONFIG_BYTECODE_WAIT=y
+# outputs mqjs_baremetal.elf and riscv/test_code.slot
+
+qemu-system-riscv32 -machine virt -cpu rv32 -nographic -bios none \
+  -kernel ./mqjs_baremetal.elf -m 4M -serial mon:stdio \
+  -device loader,file=riscv/test_code.slot,addr=0x80100000
 ```
+
+The generated QEMU slot contains `ready=1` because QEMU loads it before the CPU starts. On real hardware, write the complete slot with `ready=0`, then write `1` to `JSBYTECODE_ADDR + 12` as the final operation.
 
 ### Build Options
 
@@ -73,7 +108,12 @@ The following options can be configured in the Makefile:
 - `CONFIG_RISCV32_BAREMETAL=y`: Enable RISC-V 32-bit baremetal mode
 - `CONFIG_SMALL=y`: Optimize for code size (enabled by default)
 - `HEAP_SIZE`: Heap size (default 16384 bytes)
+- `MCOUNTER_FREQ_HZ`: `mcycle` counter frequency in Hz (default 10000000). The resulting `gettimeofday()` value is monotonic time relative to the counter origin, not Unix epoch time.
 - `CONFIG_WERROR=y`: Treat warnings as errors (for development)
+- `CONFIG_BYTECODE=y`: Host-compile `riscv/test_code.js` and run the bytecode from `JSBYTECODE_ADDR` (default `0x80100000`).
+- `CONFIG_BYTECODE_WAIT=y`: Same address, but firmware waits for an external loader to write a mailbox slot (`JSBYTECODE_SIZE`, default 8192). Implies `CONFIG_BYTECODE`.
+- `BYTECODE_WAIT_SPINS`: Optional wait-loop limit; `0` waits forever, while a nonzero value reports `JSBC_SLOT_ERROR` on timeout.
+- `CONFIG_BYTECODE_CHECKSUM`: Enable slot checksum validation (default `1`). Set to `0` to skip checksum calculation and reduce startup time when the loader and memory are trusted.
 
 ## Running and Testing
 
