@@ -314,8 +314,29 @@ libm_test: tests/libm_test.o libm.o
 rempio2_test: tests/rempio2_test.o libm.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
+RISCV32_CC ?= riscv32-unknown-elf-gcc
+QEMU_SYSTEM_RISCV32 ?= qemu-system-riscv32
+
+# Host oracle vs native 64-bit shifts, then RV32 assembly vs the same oracle.
+riscv/test_shift_ref_host: riscv/test_shift_rv32.c
+	$(HOST_CC) -O0 -Wall -DHOST_TEST -o $@ $<
+
+riscv/test_shift_rv32.elf: riscv/test_shift_rv32.c riscv/shift_rv32.s riscv/start_riscv32.s riscv/riscv32_baremetal.ld
+	$(RISCV32_CC) -march=rv32imac_zicsr -mabi=ilp32 -mstrict-align -mcmodel=medany \
+	  -ffreestanding -nostdlib -fno-builtin -O0 -Wall \
+	  -Wl,-T,./riscv/riscv32_baremetal.ld \
+	  -o $@ riscv/start_riscv32.s riscv/shift_rv32.s riscv/test_shift_rv32.c
+
+.PHONY: test-shift-host test-shift-rv32
+test-shift-host: riscv/test_shift_ref_host
+	./riscv/test_shift_ref_host
+
+test-shift-rv32: test-shift-host riscv/test_shift_rv32.elf
+	timeout --foreground 8 $(QEMU_SYSTEM_RISCV32) -machine virt -cpu rv32 -nographic -bios none \
+	  -kernel riscv/test_shift_rv32.elf -m 4M
+
 clean:
-	rm -f riscv/*.o riscv/*.d riscv/ready.bin riscv/jsbytecode.s riscv/test_code.bin riscv/test_code.slot *.o *.d *~ tests/*.o tests/*.d tests/*~ test_builtin.bin mqjs_stdlib mqjs_stdlib.h mquickjs_build_atoms mquickjs_atom.h mqjs_example example_stdlib example_stdlib.h $(PROGS) $(TEST_PROGS) mqjs_baremetal.elf
+	rm -f riscv/*.o riscv/*.d riscv/ready.bin riscv/jsbytecode.s riscv/test_code.bin riscv/test_code.slot riscv/test_shift_rv32.elf riscv/test_shift_ref_host *.o *.d *~ tests/*.o tests/*.d tests/*~ test_builtin.bin mqjs_stdlib mqjs_stdlib.h mquickjs_build_atoms mquickjs_atom.h mqjs_example example_stdlib example_stdlib.h $(PROGS) $(TEST_PROGS) mqjs_baremetal.elf
 	rm -rf host_build
 
 -include $(wildcard *.d)
