@@ -1,6 +1,7 @@
 /* Baremetal system call stubs for RISC-V RV32 */
 #include <stddef.h>
 #include <stdarg.h>
+#include <stdint.h>
 
 #include "../mquickjs.h"
 
@@ -277,26 +278,37 @@ JSValue js_console_log(JSContext *ctx, JSValue *this_val, int argc, JSValue *arg
     return JS_UNDEFINED;
 }
 
+/* Forward declarations */
+void *memcpy(void *dest, const void *src, size_t n);
+void *memset(void *s, int c, size_t n);
+
 /* Memory stubs for RV32 */
+typedef struct {
+    size_t size;
+} alloc_header_t;
+
 void *malloc(size_t size) {
     extern char __heap_start[];
     extern char __heap_end[];
     static char *heap_ptr = NULL;
-    void *ptr;
 
     if (heap_ptr == NULL) {
         heap_ptr = __heap_start;
     }
 
-    ptr = heap_ptr;
-    heap_ptr = (char *)(((unsigned int)heap_ptr + 3) & ~3u); /* align to 4 bytes for RV32 */
-    heap_ptr += size;
+    /* Align to 4 bytes for RV32 */
+    uintptr_t cur = ((uintptr_t)heap_ptr + 3) & ~3u;
+    size_t total = sizeof(alloc_header_t) + size;
 
-    if (heap_ptr > __heap_end) {
-        return NULL; /* out of memory */
+    if (cur + total > (uintptr_t)__heap_end || cur + total < cur) {
+        return NULL; /* out of memory or overflow */
     }
 
-    return ptr;
+    alloc_header_t *hdr = (alloc_header_t *)cur;
+    hdr->size = size;
+
+    heap_ptr = (char *)(cur + total);
+    return (void *)(hdr + 1);
 }
 
 void free(void *ptr) {
@@ -305,22 +317,32 @@ void free(void *ptr) {
 }
 
 void *realloc(void *ptr, size_t size) {
+    if (!ptr) {
+        return malloc(size);
+    }
+    if (size == 0) {
+        free(ptr);
+        return NULL;
+    }
+
+    alloc_header_t *old_hdr = (alloc_header_t *)ptr - 1;
     void *new_ptr = malloc(size);
-    if (new_ptr && ptr) {
-        /* Copy old data - we don't know the size, so this is imperfect */
-        /* For our use case, this should be sufficient */
+    if (new_ptr) {
+        size_t copy_size = (old_hdr->size < size) ? old_hdr->size : size;
+        memcpy(new_ptr, ptr, copy_size);
+        free(ptr);
     }
     return new_ptr;
 }
 
 void *calloc(size_t nmemb, size_t size) {
-    void *ptr = malloc(nmemb * size);
+    if (nmemb != 0 && size > SIZE_MAX / nmemb) {
+        return NULL;
+    }
+    size_t total = nmemb * size;
+    void *ptr = malloc(total);
     if (ptr) {
-        char *p = (char *)ptr;
-        size_t i;
-        for (i = 0; i < nmemb * size; i++) {
-            p[i] = 0;
-        }
+        memset(ptr, 0, total);
     }
     return ptr;
 }

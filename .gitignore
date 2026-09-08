@@ -16,4 +16,5 @@ dtoa_test
 libm_test
 mqjs_host
 host_build/
+build/
 riscv/jsbytecode.s

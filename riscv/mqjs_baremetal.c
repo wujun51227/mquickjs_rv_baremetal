@@ -36,12 +36,24 @@
 #include "../cutils.h"
 #include "../mquickjs.h"
 
+/* newlib's <time.h> does not expose gettimeofday() on this freestanding
+ * target; the implementation lives in baremetal_syscall_rv*.c. */
+extern int gettimeofday(struct timeval *tv, struct timezone *tz);
+
 /* Forward declaration for console.log */
 JSValue js_console_log(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 
 
-extern char __heap_start[];
-extern char __heap_end[];
+#ifndef JS_HEAP_SIZE
+#ifdef HEAP_SIZE
+#define JS_HEAP_SIZE HEAP_SIZE
+#else
+#define JS_HEAP_SIZE (16 * 1024)
+#endif
+#endif
+
+/* Dedicated memory pool for QuickJS engine, strictly 8-byte aligned */
+static uint8_t js_engine_pool[JS_HEAP_SIZE] __attribute__((aligned(8)));
 
 #ifdef CONFIG_BYTECODE
 /* Filled by the linker from .jsbytecode at JSBYTECODE_ADDR (writable RAM). */
@@ -205,7 +217,7 @@ static JSValue js_clearTimeout(JSContext *ctx, JSValue *this_val, int argc, JSVa
     return JS_UNDEFINED;
 }
 
-#include "../mqjs_stdlib.h"
+#include "mqjs_stdlib.h" /* generated per-configuration; see -I$(BUILD_DIR) */
 
 #define STYLE_DEFAULT    COLOR_BRIGHT_GREEN
 #define STYLE_COMMENT    COLOR_WHITE
@@ -394,13 +406,9 @@ int main(int argc, char **argv)
     printf("MicroQuickJS Baremetal RISC-V\n");
     printf("=============================\n\n");
 
-    /* Set up memory for JavaScript engine */
-#ifdef HEAP_SIZE
-    mem_size = HEAP_SIZE;
-#else
-    mem_size = 16*1024; /* 16 KB default */
-#endif
-    mem_buf = (uint8_t *)__heap_start;
+    /* Set up memory for JavaScript engine from dedicated pool */
+    mem_size = sizeof(js_engine_pool);
+    mem_buf = js_engine_pool;
 
     printf("Initializing JavaScript engine...\n");
     ctx = JS_NewContext(mem_buf, mem_size, &js_stdlib);

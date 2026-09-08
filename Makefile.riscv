@@ -102,6 +102,56 @@ endif
 ifdef CONFIG_BYTECODE_WAIT
 CONFIG_BYTECODE=y
 endif
+
+# --- Per-configuration build isolation -------------------------------
+# Every baremetal configuration gets its own output tree so objects built
+# with one architecture/ABI/feature set can never be reused by another:
+#
+#   build/riscv32        default RV32 firmware
+#   build/riscv64        default RV64 firmware
+#   build/riscv32-bc     RV32 with embedded bytecode (CONFIG_BYTECODE=y)
+#   build/riscv64-bc     RV64 with embedded bytecode (CONFIG_BYTECODE=y)
+#   build/riscv32-wait   RV32 mailbox/late load   (CONFIG_BYTECODE_WAIT=y)
+#   build/riscv64-wait   RV64 mailbox/late load   (CONFIG_BYTECODE_WAIT=y)
+#
+# Objects, the host bytecode generator, the generated headers and the ELF
+# all live inside the tree.  The generated mqjs_stdlib.h/mquickjs_atom.h
+# depend on $(STD_CFG), so they are per-target outputs, not shared files.
+# Override with BUILD_DIR=<path> on the command line if needed.
+ifdef BAREMETAL
+BUILD_ARCH=riscv-unknown
+ifdef CONFIG_RISCV64_BAREMETAL
+BUILD_ARCH=riscv64
+endif
+ifdef CONFIG_RISCV32_BAREMETAL
+BUILD_ARCH=riscv32
+endif
+BUILD_MODE=
+ifneq ($(CONFIG_BYTECODE_WAIT),)
+BUILD_MODE=-wait
+else ifneq ($(CONFIG_BYTECODE),)
+BUILD_MODE=-bc
+endif
+BUILD_DIR ?= build/$(BUILD_ARCH)$(BUILD_MODE)
+# Quoted includes such as "mqjs_stdlib.h" must resolve to the
+# per-configuration generated headers, never to a stale root-level copy
+# left behind by a host-mode build.
+CFLAGS+=-I$(BUILD_DIR)
+# -I. recovers the (source-controlled) engine headers referenced by the
+# generated mqjs_stdlib.h; -I$(BUILD_DIR) keeps generated headers winning
+# over any stale root-level copies.
+CFLAGS+=-I.
+# Compile/link parameter fingerprints (rules at the bottom of this file).
+# Every target object explicitly depends on the cflags stamp, every link on
+# the ldflags stamp, so changing any build parameter (HEAP_SIZE,
+# JSBYTECODE_ADDR, MCOUNTER_FREQ_HZ, UART_BASE_ADDR, toolchain, ...) or this
+# makefile rebuilds exactly the affected artifacts instead of silently
+# reusing objects compiled with different flags.
+CFLAGS_STAMP=$(BUILD_DIR)/.cflags
+LDFLAGS_STAMP=$(BUILD_DIR)/.ldflags
+HOST_CFLAGS_STAMP=$(BUILD_DIR)/.host-cflags
+endif # BAREMETAL
+
 ifdef CONFIG_BYTECODE
 CFLAGS+=-DCONFIG_BYTECODE
 ifdef CONFIG_BYTECODE_CHECKSUM
@@ -110,7 +160,9 @@ endif
 JSBYTECODE_ADDR ?= 0x80100000
 LDFLAGS+=-Wl,--defsym,__jsbytecode_addr=$(JSBYTECODE_ADDR)
 LDFLAGS+=-Wl,--section-start=.jsbytecode=$(JSBYTECODE_ADDR)
-HOST_BUILD=host_build
+# Host-side bytecode compiler tree, isolated per configuration because the
+# generated headers and the -m32/-m64 codegen differ between RV32 and RV64.
+HOST_BUILD=$(BUILD_DIR)/host
 JS_TO_BC=$(HOST_BUILD)/js_to_bc
 ifdef CONFIG_RISCV32_BAREMETAL
 JS_TO_BC_FLAGS=-m32
@@ -157,11 +209,11 @@ PROGS=mqjs$(EXE) example$(EXE)
 TEST_PROGS=dtoa_test libm_test
 
 ifdef CONFIG_RISCV64_BAREMETAL
-PROGS=mqjs_baremetal.elf
+PROGS=$(BUILD_DIR)/mqjs_baremetal.elf
 endif 
 
 ifdef CONFIG_RISCV32_BAREMETAL
-PROGS=mqjs_baremetal.elf
+PROGS=$(BUILD_DIR)/mqjs_baremetal.elf
 endif 
 
 all: $(PROGS)
@@ -171,14 +223,14 @@ LIBS=-lm
 
 ifdef BAREMETAL
 ifdef CONFIG_RISCV64_BAREMETAL
-MQJS_BAREMETAL_OBJS=./riscv/mqjs_baremetal.o ./riscv/baremetal_syscall_rv64.o mquickjs.o dtoa.o libm.o cutils.o ./riscv/start_riscv64.o
+MQJS_BAREMETAL_OBJS=$(BUILD_DIR)/riscv/mqjs_baremetal.o $(BUILD_DIR)/riscv/baremetal_syscall_rv64.o $(BUILD_DIR)/mquickjs.o $(BUILD_DIR)/dtoa.o $(BUILD_DIR)/libm.o $(BUILD_DIR)/cutils.o $(BUILD_DIR)/riscv/start_riscv64.o
 endif
 ifdef CONFIG_RISCV32_BAREMETAL
-MQJS_BAREMETAL_OBJS=./riscv/mqjs_baremetal.o ./riscv/baremetal_syscall_rv32.o mquickjs.o dtoa.o libm.o cutils.o ./riscv/start_riscv32.o
+MQJS_BAREMETAL_OBJS=$(BUILD_DIR)/riscv/mqjs_baremetal.o $(BUILD_DIR)/riscv/baremetal_syscall_rv32.o $(BUILD_DIR)/mquickjs.o $(BUILD_DIR)/dtoa.o $(BUILD_DIR)/libm.o $(BUILD_DIR)/cutils.o $(BUILD_DIR)/riscv/start_riscv32.o
 endif
 ifdef CONFIG_BYTECODE
 ifndef CONFIG_BYTECODE_WAIT
-MQJS_BAREMETAL_OBJS+=riscv/jsbytecode.o
+MQJS_BAREMETAL_OBJS+=$(BUILD_DIR)/jsbytecode.o
 endif
 endif
 else
@@ -190,28 +242,58 @@ mqjs$(EXE): $(MQJS_OBJS)
 
 ifdef CONFIG_BYTECODE
 ifndef CONFIG_BYTECODE_WAIT
-mqjs_baremetal.elf: riscv/jsbytecode.o riscv/test_code.bin
+$(BUILD_DIR)/mqjs_baremetal.elf: $(BUILD_DIR)/jsbytecode.o $(BUILD_DIR)/test_code.bin
 else
-mqjs_baremetal.elf: riscv/test_code.slot
+$(BUILD_DIR)/mqjs_baremetal.elf: $(BUILD_DIR)/test_code.slot
 endif
 endif
 
 ifdef CONFIG_RISCV64_BAREMETAL
-mqjs_baremetal.elf: mqjs_stdlib.h $(MQJS_BAREMETAL_OBJS) ./riscv/riscv64_baremetal.ld
+$(BUILD_DIR)/mqjs_baremetal.elf: $(LDFLAGS_STAMP) $(CFLAGS_STAMP) $(BUILD_DIR)/mqjs_stdlib.h $(MQJS_BAREMETAL_OBJS) ./riscv/riscv64_baremetal.ld
 	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(MQJS_BAREMETAL_OBJS) 
 endif
 
 ifdef CONFIG_RISCV32_BAREMETAL
-mqjs_baremetal.elf: mqjs_stdlib.h $(MQJS_BAREMETAL_OBJS) ./riscv/shift_rv32.o ./riscv/riscv32_baremetal.ld
-	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(MQJS_BAREMETAL_OBJS) ./riscv/shift_rv32.o
+$(BUILD_DIR)/mqjs_baremetal.elf: $(LDFLAGS_STAMP) $(CFLAGS_STAMP) $(BUILD_DIR)/mqjs_stdlib.h $(MQJS_BAREMETAL_OBJS) $(BUILD_DIR)/riscv/shift_rv32.o ./riscv/riscv32_baremetal.ld
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(MQJS_BAREMETAL_OBJS) $(BUILD_DIR)/riscv/shift_rv32.o
 endif
 
-# mqjs_baremetal.c includes the generated mqjs_stdlib.h; without this rule a
-# clean parallel build compiles the object before the header is generated.
-riscv/mqjs_baremetal.o: mqjs_stdlib.h
+# mqjs_baremetal.c includes the generated mqjs_stdlib.h and mquickjs.c the
+# generated mquickjs_atom.h; without these explicit dependencies a clean
+# parallel build compiles the objects before the headers are generated.
+ifdef BAREMETAL
+$(BUILD_DIR)/riscv/mqjs_baremetal.o: $(BUILD_DIR)/mqjs_stdlib.h
 
-mquickjs.o: mquickjs_atom.h
+# mquickjs.c is compiled from a copy inside $(BUILD_DIR) so its quoted
+# include of "mquickjs_atom.h" resolves to the per-configuration generated
+# header (atom tables differ between RV32 and RV64), never to a stale
+# root-level one produced by a host build.  The explicit dependencies also
+# make clean parallel builds safe.
+$(BUILD_DIR)/mquickjs.c: mquickjs.c
+	@mkdir -p $(dir $@)
+	cp $< $@
 
+$(BUILD_DIR)/mquickjs.o: $(BUILD_DIR)/mquickjs.c $(BUILD_DIR)/mquickjs_atom.h $(CFLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $(BUILD_DIR)/mquickjs.c
+
+# Per-configuration host bytecode-generator tool and generated headers.
+# The target headers are generated with $(STD_CFG) (-m32 for RV32) because
+# atom tables differ between RV32 and RV64.
+$(BUILD_DIR)/mqjs_stdlib: $(BUILD_DIR)/mqjs_stdlib.host.o $(BUILD_DIR)/mquickjs_build.host.o
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_LDFLAGS) -o $@ $^
+
+$(BUILD_DIR)/mquickjs_atom.h: $(BUILD_DIR)/mqjs_stdlib
+	@mkdir -p $(dir $@)
+	$(BUILD_DIR)/mqjs_stdlib $(STD_CFG) -a $(MQJS_BUILD_FLAGS) > $@
+
+$(BUILD_DIR)/mqjs_stdlib.h: $(BUILD_DIR)/mqjs_stdlib
+	@mkdir -p $(dir $@)
+	$(BUILD_DIR)/mqjs_stdlib $(STD_CFG) $(MQJS_BUILD_FLAGS) > $@
+endif # BAREMETAL
+
+# Host (non-baremetal) builds keep the legacy root-level outputs.
 mqjs_stdlib: mqjs_stdlib.host.o mquickjs_build.host.o
 	$(HOST_CC) $(HOST_LDFLAGS) -o $@ $^
 
@@ -222,44 +304,56 @@ mqjs_stdlib.h: mqjs_stdlib
 	./mqjs_stdlib $(STD_CFG) $(MQJS_BUILD_FLAGS) > $@
 
 ifdef CONFIG_BYTECODE
-$(HOST_BUILD):
-	mkdir -p $(HOST_BUILD)
-
-$(HOST_BUILD)/mquickjs_atom.h: mqjs_stdlib | $(HOST_BUILD)
-	./mqjs_stdlib -a > $@
-
-$(HOST_BUILD)/mqjs_stdlib.h: mqjs_stdlib | $(HOST_BUILD)
-	./mqjs_stdlib > $@
-
-$(HOST_BUILD)/mquickjs.c: mquickjs.c | $(HOST_BUILD)
+ifdef BAREMETAL
+$(BUILD_DIR)/host/mquickjs.c: mquickjs.c
+	@mkdir -p $(dir $@)
 	cp $< $@
 
-$(HOST_BUILD)/mquickjs.o: $(HOST_BUILD)/mquickjs.c $(HOST_BUILD)/mquickjs_atom.h
-	$(HOST_CC) $(HOST_CFLAGS) -I$(HOST_BUILD) -I. -c -o $@ $(HOST_BUILD)/mquickjs.c
+$(BUILD_DIR)/host/mquickjs_atom.h: $(BUILD_DIR)/mqjs_stdlib
+	@mkdir -p $(dir $@)
+	$(BUILD_DIR)/mqjs_stdlib -a > $@
 
-$(HOST_BUILD)/js_to_bc.o: riscv/js_to_bc.c riscv/jsbytecode_slot.h $(HOST_BUILD)/mqjs_stdlib.h
-	$(HOST_CC) $(HOST_CFLAGS) -I$(HOST_BUILD) -I. -c -o $@ riscv/js_to_bc.c
+$(BUILD_DIR)/host/mqjs_stdlib.h: $(BUILD_DIR)/mqjs_stdlib
+	@mkdir -p $(dir $@)
+	$(BUILD_DIR)/mqjs_stdlib > $@
 
-$(JS_TO_BC): $(HOST_BUILD)/js_to_bc.o $(HOST_BUILD)/mquickjs.o cutils.host.o dtoa.host.o libm.host.o
+$(BUILD_DIR)/host/mquickjs.o: $(BUILD_DIR)/host/mquickjs.c $(BUILD_DIR)/host/mquickjs_atom.h $(HOST_CFLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(BUILD_DIR)/host -I. -c -o $@ $(BUILD_DIR)/host/mquickjs.c
+
+$(BUILD_DIR)/host/js_to_bc.o: riscv/js_to_bc.c riscv/jsbytecode_slot.h $(BUILD_DIR)/host/mqjs_stdlib.h $(HOST_CFLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(BUILD_DIR)/host -I. -c -o $@ riscv/js_to_bc.c
+
+$(BUILD_DIR)/host/%.host.o: %.c $(HOST_CFLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) -c -o $@ $<
+
+$(JS_TO_BC): $(BUILD_DIR)/host/js_to_bc.o $(BUILD_DIR)/host/mquickjs.o $(BUILD_DIR)/host/cutils.host.o $(BUILD_DIR)/host/dtoa.host.o $(BUILD_DIR)/host/libm.host.o
 	$(HOST_CC) $(HOST_LDFLAGS) -o $@ $^ -lm
 
-riscv/test_code.bin: riscv/test_code.js $(JS_TO_BC)
+$(BUILD_DIR)/test_code.bin: riscv/test_code.js $(JS_TO_BC)
+	@mkdir -p $(dir $@)
 	$(JS_TO_BC) $(JS_TO_BC_FLAGS) -o $@ $<
 
-riscv/test_code.slot: riscv/test_code.bin $(JS_TO_BC)
+$(BUILD_DIR)/test_code.slot: $(BUILD_DIR)/test_code.bin $(JS_TO_BC)
+	@mkdir -p $(dir $@)
 	$(JS_TO_BC) --wrap-slot -o $@ $<
 
-riscv/jsbytecode.s: riscv/test_code.bin
+$(BUILD_DIR)/jsbytecode.s: $(BUILD_DIR)/test_code.bin
+	@mkdir -p $(dir $@)
 	( echo ".section .jsbytecode, \"aw\", @progbits"; \
 	  echo ".balign 8"; \
 	  echo ".globl __jsbytecode_start"; \
 	  echo ".globl __jsbytecode_end"; \
 	  echo "__jsbytecode_start:"; \
-	  echo ".incbin \"riscv/test_code.bin\""; \
+	  echo ".incbin \"$<\""; \
 	  echo "__jsbytecode_end:" ) > $@
 
-riscv/jsbytecode.o: riscv/jsbytecode.s
-	$(CC) $(CFLAGS) -c -o $@ -Wa,-I,riscv $<
+$(BUILD_DIR)/jsbytecode.o: $(BUILD_DIR)/jsbytecode.s $(CFLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+endif # BAREMETAL
 endif # CONFIG_BYTECODE
 
 mqjs.o: mqjs_stdlib.h
@@ -281,6 +375,22 @@ example_stdlib.h: example_stdlib
 
 %.o: %.s
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+ifdef BAREMETAL
+# Per-configuration objects; the cflags stamp is an explicit dependency so
+# any compile-parameter change forces a rebuild.
+$(BUILD_DIR)/%.host.o: %.c $(HOST_CFLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) -c -o $@ $<
+
+$(BUILD_DIR)/%.o: %.c $(CFLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD_DIR)/%.o: %.s $(CFLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+endif # BAREMETAL
 
 %.host.o: %.c
 	$(HOST_CC) $(HOST_CFLAGS) -c -o $@ $<
@@ -336,7 +446,34 @@ test-shift-rv32: test-shift-host riscv/test_shift_rv32.elf
 	  -kernel riscv/test_shift_rv32.elf -m 4M
 
 clean:
+	rm -rf build host_build
 	rm -f riscv/*.o riscv/*.d riscv/ready.bin riscv/jsbytecode.s riscv/test_code.bin riscv/test_code.slot riscv/test_shift_rv32.elf riscv/test_shift_ref_host *.o *.d *~ tests/*.o tests/*.d tests/*~ test_builtin.bin mqjs_stdlib mqjs_stdlib.h mquickjs_build_atoms mquickjs_atom.h mqjs_example example_stdlib example_stdlib.h $(PROGS) $(TEST_PROGS) mqjs_baremetal.elf
-	rm -rf host_build
+
+# --- Explicit build-parameter dependency stamps ----------------------
+# Each stamp stores the signature of the corresponding command line.  It is
+# rewritten (mtime bumped) only when the signature changes, so an unchanged
+# incremental build stays a no-op, while any parameter change - or an edit
+# of this makefile, via $(MAKEFILE_LIST) - forces the dependent objects and
+# links to be redone.
+.PHONY: FORCE
+FORCE:
+
+$(CFLAGS_STAMP): $(MAKEFILE_LIST) FORCE
+	@mkdir -p $(dir $@)
+	@printf 'CC=%s\nCFLAGS=%s\n' '$(CC)' '$(CFLAGS)' | cmp -s - $@ || \
+	  printf 'CC=%s\nCFLAGS=%s\n' '$(CC)' '$(CFLAGS)' > $@
+
+$(LDFLAGS_STAMP): $(MAKEFILE_LIST) FORCE
+	@mkdir -p $(dir $@)
+	@printf 'CC=%s\nLDFLAGS=%s\n' '$(CC)' '$(LDFLAGS)' | cmp -s - $@ || \
+	  printf 'CC=%s\nLDFLAGS=%s\n' '$(CC)' '$(LDFLAGS)' > $@
+
+$(HOST_CFLAGS_STAMP): $(MAKEFILE_LIST) FORCE
+	@mkdir -p $(dir $@)
+	@printf 'HOST_CC=%s\nHOST_CFLAGS=%s\n' '$(HOST_CC)' '$(HOST_CFLAGS)' | cmp -s - $@ || \
+	  printf 'HOST_CC=%s\nHOST_CFLAGS=%s\n' '$(HOST_CC)' '$(HOST_CFLAGS)' > $@
 
 -include $(wildcard *.d)
+ifneq ($(BUILD_DIR),)
+-include $(wildcard $(BUILD_DIR)/*.d $(BUILD_DIR)/riscv/*.d $(BUILD_DIR)/host/*.d)
+endif
