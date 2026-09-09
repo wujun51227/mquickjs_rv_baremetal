@@ -3,8 +3,12 @@
 .section .text.init
 .global _start
 _start:
-    /* Disable interrupts */
+    /* Disable interrupts (clear MIE bit 3) */
     csrci mstatus, 0x8
+
+    /* Set default trap handler */
+    la t0, _trap_handler
+    csrw mtvec, t0
 
     /* Initialize Global Pointer */
     .option push
@@ -26,15 +30,29 @@ bss_done:
     la sp, __stack_top
     addi sp, sp, -16
 
-    /* Call main */
+    /* Call main(0, NULL) */
+    li a0, 0
+    li a1, 0
     call main
 
-    /* Infinite loop if main returns */
+    /* Terminate execution */
+    /* Try QEMU virt test finisher at 0x100000 */
+    li t0, 0x100000
+    beqz a0, 1f
+    slliw a0, a0, 16
+    li t1, 0x3333
+    or a0, a0, t1
+    sw a0, 0(t0)
+    j loop
+1:
+    li t1, 0x5555
+    sw t1, 0(t0)
 loop:
-        fence
-        li gp, 1
-        li a7, 93
-        li a0, 0
-        ecall
     wfi
     j loop
+
+.global _trap_handler
+    .p2align 2
+_trap_handler:
+    wfi
+    j _trap_handler

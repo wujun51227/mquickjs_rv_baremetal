@@ -3,7 +3,6 @@
 #include <stdarg.h>
 #include <stdint.h>
 
-#include "../mquickjs.h"
 
 /* Define FILE structure for stdout */
 typedef struct {
@@ -41,27 +40,29 @@ struct timezone {
 #define UART_BASE_ADDR 0x10000000
 #endif
 
-/* Simple putchar */
-void putchar(char c) {
-    volatile char *uart = (volatile char *)UART_BASE_ADDR;
-    *uart = c;
+/* Simple putchar with 16550 LSR THRE check and CRLF translation */
+int putchar(int c) {
+    volatile uint8_t *uart = (volatile uint8_t *)UART_BASE_ADDR;
+    if (c == '\n') {
+        while ((uart[5] & 0x20) == 0);
+        uart[0] = '\r';
+    }
+    while ((uart[5] & 0x20) == 0);
+    uart[0] = (uint8_t)c;
+    return c;
 }
 
 /* Simple puts */
-void puts(const char *s) {
+int puts(const char *s) {
     while (*s) {
         putchar(*s++);
     }
+    putchar('\n');
+    return 0;
 }
 
 /* Minimal printf implementation */
-static char print_buf[256];
-static int print_idx = 0;
-
 static void print_char(char c) {
-    if (c == '\n') {
-        putchar('\r');
-    }
     putchar(c);
 }
 
@@ -80,9 +81,9 @@ static void print_number(long num, int base, int is_signed, int width, char pad_
 
     if (is_signed && num < 0) {
         negative = 1;
-        unum = -num;
+        unum = (unsigned long)-num;
     } else {
-        unum = num;
+        unum = (unsigned long)num;
     }
 
     if (unum == 0) {
@@ -92,6 +93,12 @@ static void print_number(long num, int base, int is_signed, int width, char pad_
             buf[i++] = digits[unum % base];
             unum /= base;
         }
+    }
+
+    if (negative && pad_char == '0') {
+        print_char('-');
+        negative = 0;
+        if (width > 0) width--;
     }
 
     if (negative) {
@@ -173,6 +180,12 @@ int printf(const char *fmt, ...) {
 
 /* Minimal exit */
 void exit(int status) {
+    volatile uint32_t *test_dev = (volatile uint32_t *)0x100000;
+    if (status == 0) {
+        *test_dev = 0x5555;
+    } else {
+        *test_dev = 0x3333 | ((uint32_t)status << 16);
+    }
     while (1) {
         asm volatile("wfi");
     }
@@ -197,86 +210,6 @@ ssize_t write(int fd, const void *buf, size_t count) {
 off_t lseek(int fd, off_t offset, int whence) { return -1; }
 
 /* Function definitions for the baremetal version */
-JSValue js_print(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
-{
-    int i;
-    JSValue v;
-    
-    for(i = 0; i < argc; i++) {
-        if (i != 0) {
-            putchar(' ');
-        }
-        v = argv[i];
-        if (JS_IsString(ctx, v)) {
-            JSCStringBuf buf;
-            const char *str;
-            size_t len;
-            str = JS_ToCStringLen(ctx, &len, v, &buf);
-            if (!str)
-                return JS_EXCEPTION;
-            // Write each character individually using putchar (assumes putchar is available in your baremetal environment)
-            for(size_t j = 0; j < len; j++) {
-                putchar(str[j]);
-            }
-        } else {
-            // For now, we'll just return undefined for non-strings, since JS_PrintValueF might not work in baremetal
-            // You might need to implement a simple JS value to string function for baremetal
-        }
-    }
-    putchar('\n');
-    return JS_UNDEFINED;
-}
-
-JSValue js_gc(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
-{
-    JS_GC(ctx);
-    return JS_UNDEFINED;
-}
-
-JSValue js_load(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
-{
-    // Not implemented for baremetal
-    return JS_ThrowTypeError(ctx, "load() not implemented");
-}
-
-JSValue js_setTimeout(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
-{
-    // Not implemented for baremetal
-    return JS_ThrowTypeError(ctx, "setTimeout() not implemented");
-}
-
-JSValue js_clearTimeout(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
-{
-    // Not implemented for baremetal
-    return JS_ThrowTypeError(ctx, "clearTimeout() not implemented");
-}
-
-/* console.log implementation */
-JSValue js_console_log(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
-{
-    int i;
-    JSValue v;
-    
-    for(i = 0; i < argc; i++) {
-        if (i != 0)
-            print_char(' ');
-        v = argv[i];
-        if (JS_IsString(ctx, v)) {
-            JSCStringBuf buf;
-            const char *str;
-            size_t len;
-            str = JS_ToCStringLen(ctx, &len, v, &buf);
-            if (str) {
-                print_string(str);
-            }
-        } else {
-            // For non-string values, just print a placeholder
-            print_string("[object]");
-        }
-    }
-    print_char('\n');
-    return JS_UNDEFINED;
-}
 
 /* Forward declarations */
 void *memcpy(void *dest, const void *src, size_t n);
@@ -285,19 +218,21 @@ void *memset(void *s, int c, size_t n);
 /* Memory stubs for RV32 */
 typedef struct {
     size_t size;
+    size_t dummy; /* Pad to 8 bytes so (hdr + 1) is 8-byte aligned */
 } alloc_header_t;
+
+static char *heap_ptr;
 
 void *malloc(size_t size) {
     extern char __heap_start[];
     extern char __heap_end[];
-    static char *heap_ptr = NULL;
 
     if (heap_ptr == NULL) {
         heap_ptr = __heap_start;
     }
 
-    /* Align to 4 bytes for RV32 */
-    uintptr_t cur = ((uintptr_t)heap_ptr + 3) & ~3u;
+    /* Align to 8 bytes for RV32 */
+    uintptr_t cur = ((uintptr_t)heap_ptr + 7) & ~7u;
     size_t total = sizeof(alloc_header_t) + size;
 
     if (cur + total > (uintptr_t)__heap_end || cur + total < cur) {
@@ -317,21 +252,35 @@ void free(void *ptr) {
 }
 
 void *realloc(void *ptr, size_t size) {
-    if (!ptr) {
+    extern char __heap_end[];
+    alloc_header_t *old_hdr;
+    uintptr_t old_end, new_end;
+    void *new_ptr;
+    size_t copy_size;
+
+    if (!ptr)
         return malloc(size);
-    }
     if (size == 0) {
         free(ptr);
         return NULL;
     }
 
-    alloc_header_t *old_hdr = (alloc_header_t *)ptr - 1;
-    void *new_ptr = malloc(size);
-    if (new_ptr) {
-        size_t copy_size = (old_hdr->size < size) ? old_hdr->size : size;
-        memcpy(new_ptr, ptr, copy_size);
-        free(ptr);
+    old_hdr = (alloc_header_t *)ptr - 1;
+    old_end = (uintptr_t)old_hdr + sizeof(*old_hdr) + old_hdr->size;
+    new_end = (uintptr_t)old_hdr + sizeof(*old_hdr) + size;
+    if ((char *)old_end == heap_ptr && new_end >= (uintptr_t)old_hdr &&
+        new_end <= (uintptr_t)__heap_end) {
+        old_hdr->size = size;
+        heap_ptr = (char *)new_end;
+        return ptr;
     }
+
+    new_ptr = malloc(size);
+    if (!new_ptr)
+        return NULL;
+    copy_size = (old_hdr->size < size) ? old_hdr->size : size;
+    memcpy(new_ptr, ptr, copy_size);
+    free(ptr);
     return new_ptr;
 }
 
@@ -362,10 +311,14 @@ void __assert_func(const char *file, int line, const char *func, const char *exp
 }
 
 double copysign(double x, double y) {
-    unsigned int xbits = *(unsigned int *)&x;
-    unsigned int ybits = *(unsigned int *)&y;
-    xbits = (xbits & 0x7FFFFFFF) | (ybits & 0x80000000);
-    return *(double *)&xbits;
+    union {
+        double d;
+        uint64_t i;
+    } ux, uy;
+    ux.d = x;
+    uy.d = y;
+    ux.i = (ux.i & 0x7FFFFFFFFFFFFFFFull) | (uy.i & 0x8000000000000000ull);
+    return ux.d;
 }
 
 int abs(int x) {
@@ -381,104 +334,6 @@ void abort(void) {
     }
 }
 
-/* setjmp/longjmp implementation for RV32 */
-typedef struct {
-    unsigned int ra;
-    unsigned int sp;
-    unsigned int gp;
-    unsigned int tp;
-    unsigned int t0;
-    unsigned int t1;
-    unsigned int t2;
-    unsigned int t3;
-    unsigned int t4;
-    unsigned int t5;
-    unsigned int t6;
-    unsigned int s0;
-    unsigned int s1;
-    unsigned int a0;
-    unsigned int a1;
-    unsigned int a2;
-    unsigned int a3;
-    unsigned int a4;
-    unsigned int a5;
-    unsigned int a6;
-    unsigned int a7;
-    unsigned int s2;
-    unsigned int s3;
-    unsigned int s4;
-    unsigned int s5;
-    unsigned int s6;
-    unsigned int s7;
-    unsigned int s8;
-    unsigned int s9;
-    unsigned int s10;
-    unsigned int s11;
-} jmp_buf[1];
-
-int setjmp(jmp_buf env) {
-    /* Save essential registers for RV32 */
-    asm volatile(
-        "sw ra, 0(%0)\n"
-        "sw sp, 4(%0)\n"
-        "sw gp, 8(%0)\n"
-        "sw tp, 12(%0)\n"
-        "sw t0, 16(%0)\n"
-        "sw t1, 20(%0)\n"
-        "sw t2, 24(%0)\n"
-        "sw t3, 28(%0)\n"
-        "sw t4, 32(%0)\n"
-        "sw t5, 36(%0)\n"
-        "sw t6, 40(%0)\n"
-        "sw s0, 44(%0)\n"
-        "sw s1, 48(%0)\n"
-        "sw s2, 52(%0)\n"
-        "sw s3, 56(%0)\n"
-        "sw s4, 60(%0)\n"
-        "sw s5, 64(%0)\n"
-        "sw s6, 68(%0)\n"
-        "sw s7, 72(%0)\n"
-        "sw s8, 76(%0)\n"
-        "sw s9, 80(%0)\n"
-        "sw s10, 84(%0)\n"
-        "sw s11, 88(%0)\n"
-        : : "r"(env) : "memory"
-    );
-    return 0;
-}
-
-void longjmp(jmp_buf env, int val) {
-    if (val == 0)
-        val = 1;
-    asm volatile(
-        "mv a0, %1\n"
-        "lw ra, 0(%0)\n"
-        "lw sp, 4(%0)\n"
-        "lw gp, 8(%0)\n"
-        "lw tp, 12(%0)\n"
-        "lw t0, 16(%0)\n"
-        "lw t1, 20(%0)\n"
-        "lw t2, 24(%0)\n"
-        "lw t3, 28(%0)\n"
-        "lw t4, 32(%0)\n"
-        "lw t5, 36(%0)\n"
-        "lw t6, 40(%0)\n"
-        "lw s0, 44(%0)\n"
-        "lw s1, 48(%0)\n"
-        "lw s2, 52(%0)\n"
-        "lw s3, 56(%0)\n"
-        "lw s4, 60(%0)\n"
-        "lw s5, 64(%0)\n"
-        "lw s6, 68(%0)\n"
-        "lw s7, 72(%0)\n"
-        "lw s8, 76(%0)\n"
-        "lw s9, 80(%0)\n"
-        "lw s10, 84(%0)\n"
-        "lw s11, 88(%0)\n"
-        "ret\n"
-        : : "r"(env), "r"(val) : "memory"
-    );
-}
 
 /* String functions */
 int strcmp(const char *s1, const char *s2) {

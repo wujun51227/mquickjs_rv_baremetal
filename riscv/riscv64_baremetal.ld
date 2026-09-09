@@ -36,8 +36,6 @@ SECTIONS
         . = ALIGN(8);
     } > RAM
 
-    PROVIDE(__global_pointer$ = . + 0x800);
-
     .rodata : {
         *(.rodata*)
         . = ALIGN(8);
@@ -45,6 +43,8 @@ SECTIONS
 
     .data : {
         *(.data*)
+        . = ALIGN(8);
+        PROVIDE(__global_pointer$ = . + 0x800);
         *(.sdata*)
         . = ALIGN(8);
     } > RAM

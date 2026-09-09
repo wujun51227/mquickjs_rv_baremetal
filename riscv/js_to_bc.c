@@ -203,6 +203,11 @@ static int wrap_slot(const char *in_filename, const char *out_filename)
     FILE *f;
 
     buf = load_file(in_filename, &buf_len);
+    if (buf_len <= 0) {
+        fprintf(stderr, "Error: input file %s is empty\n", in_filename);
+        free(buf);
+        return 1;
+    }
     hdr.magic = JSBC_SLOT_MAGIC;
     hdr.length = (uint32_t)buf_len;
     hdr.checksum = jsbc_slot_checksum(buf, (uint32_t)buf_len);

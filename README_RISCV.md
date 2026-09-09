@@ -63,6 +63,7 @@ make -f Makefile.riscv clean
 make -f Makefile.riscv CONFIG_RISCV32_BAREMETAL=y
 
 # Output file: mqjs_baremetal.elf
+```
 
 ### Precompiled bytecode (optional)
 
@@ -80,7 +81,7 @@ Slot layout at `JSBYTECODE_ADDR`:
 | 0 | `magic` | `0x3142534A` (`JSB1`) |
 | 4 | `length` | size of the raw `.bin` |
 | 8 | `checksum` | sum of image bytes |
-| 12 | `ready` | write **last**: 0 empty, 1 ready, 2 taken, 3 done |
+| 12 | `ready` | write **last**: 0 empty, 1 ready, 2 taken, 3 done, 4 error |
 | 16 | `image` | raw `test_code.bin` |
 
 ```bash
@@ -346,12 +347,18 @@ CFLAGS += -g
 
 ```
 riscv/
-├── mqjs_baremetal.c           # Baremetal REPL main program
-├── baremetal_syscall_rv32.c   # RISC-V 32-bit system calls
+├── mqjs_baremetal.c           # Baremetal JavaScript execution main entry
+├── baremetal_syscall_rv32.c   # RISC-V 32-bit system calls (UART, time, math, memory)
 ├── baremetal_syscall_rv64.c   # RISC-V 64-bit system calls
-├── start_riscv32.s            # RISC-V 32-bit startup code
+├── start_riscv32.s            # RISC-V 32-bit startup code (_start, trap, exit)
 ├── start_riscv64.s            # RISC-V 64-bit startup code
-├── shift_rv32.s               # 32-bit shift helper functions
+├── setjmp_rv32.S              # ABI-compliant setjmp/longjmp for RV32
+├── setjmp_rv64.S              # ABI-compliant setjmp/longjmp for RV64
+├── shift_rv32.s               # 32-bit 64-bit shift helper functions (__ashldi3, etc.)
+├── jsbytecode_slot.h          # Bytecode mailbox slot header definition & checksum
+├── js_to_bc.c                 # Host tool: JS compiler to bytecode and slot packager
+├── test_code.js               # Test JavaScript script
+├── test_shift_rv32.c          # Unit tests for RV32 shift helpers
 ├── riscv32_baremetal.ld       # 32-bit linker script
 └── riscv64_baremetal.ld       # 64-bit linker script
 ```
@@ -359,28 +366,28 @@ riscv/
 ## Limitations and Notes
 
 1. **Standard Library Limitations**: The baremetal version does not include complete file system support
-2. **Floating Point Operations**: Requires hardware FPU or software floating point library support
+2. **Floating Point Operations**: Uses software floating point library support (`USE_SOFTFLOAT`)
 3. **Multithreading**: Does not support multithreading
 4. **Networking**: No networking capabilities
-5. **Dynamic Loading**: Does not support dynamic module loading
+5. **Execution Mode**: Non-interactive batch execution (evaluates embedded script or mailbox bytecode)
 
 ## FAQ
 
 ### Q: Can it run on real hardware?
 
-A: Yes, but you need to adapt the startup code and linker script to match your hardware configuration.
+A: Yes, but you need to adapt the startup code, UART base address / baud rate, and linker script to match your hardware memory map.
 
 ### Q: Which RISC-V extensions are supported?
 
-A: The base version only supports RV32I/RV64I. For other extensions (such as M, A, F, D), you need to modify the code accordingly.
+A: The default configurations use `rv32imac_zicsr` (RV32) and `rv64imac_zicsr` (RV64) with soft-float.
 
 ### Q: How do I add custom system calls?
 
-A: Add system call implementations in `baremetal_syscall_rv*.c` and register them in `mqjs_baremetal.c`.
+A: Add system call implementations in `baremetal_syscall_rv*.c` and expose any desired JS bindings in `mqjs_baremetal.c`.
 
 ### Q: What is the minimum memory requirement?
 
-A: Theoretically, 10 KB RAM is sufficient to run, but at least 16-32 KB is recommended for better performance.
+A: The compiled baremetal firmware image is ~120 KB (`.text` + `.rodata`), plus 16 KB JS heap and 8 KB C stack. At least 160 KB RAM (or ROM + RAM for XIP) is required.
 
 ## Related Resources
 

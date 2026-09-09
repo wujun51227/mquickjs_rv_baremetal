@@ -18,3 +18,5 @@ mqjs_host
 host_build/
 build/
 riscv/jsbytecode.s
+riscv/test_shift_ref_host
+.markzen/

@@ -38,10 +38,8 @@
 
 /* newlib's <time.h> does not expose gettimeofday() on this freestanding
  * target; the implementation lives in baremetal_syscall_rv*.c. */
+struct timezone;
 extern int gettimeofday(struct timeval *tv, struct timezone *tz);
-
-/* Forward declaration for console.log */
-JSValue js_console_log(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 
 
 #ifndef JS_HEAP_SIZE
@@ -65,7 +63,6 @@ extern uint8_t __jsbytecode_end[];
 #include "jsbytecode_slot.h"
 #endif
 
-static uint8_t *load_file(const char *filename, int *plen);
 
 static void dump_error(JSContext *ctx)
 {
@@ -156,14 +153,13 @@ static JSValue js_date_now(JSContext *ctx, JSValue *this_val, int argc, JSValue 
 
 static JSValue js_performance_now(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
 {
-    return 0;
+    return JS_NewInt64(ctx, get_time_ms());
 }
 
 /* load a script */
 static JSValue js_load(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
 {
-    JSValue ret;
-    return ret;
+    return JS_ThrowTypeError(ctx, "load() not implemented");
 }
 
 /* timers */
@@ -219,43 +215,6 @@ static JSValue js_clearTimeout(JSContext *ctx, JSValue *this_val, int argc, JSVa
 
 #include "mqjs_stdlib.h" /* generated per-configuration; see -I$(BUILD_DIR) */
 
-#define STYLE_DEFAULT    COLOR_BRIGHT_GREEN
-#define STYLE_COMMENT    COLOR_WHITE
-#define STYLE_STRING     COLOR_BRIGHT_CYAN
-#define STYLE_REGEX      COLOR_CYAN
-#define STYLE_NUMBER     COLOR_GREEN
-#define STYLE_KEYWORD    COLOR_BRIGHT_WHITE
-#define STYLE_FUNCTION   COLOR_BRIGHT_YELLOW
-#define STYLE_TYPE       COLOR_BRIGHT_MAGENTA
-#define STYLE_IDENTIFIER COLOR_BRIGHT_GREEN
-#define STYLE_ERROR      COLOR_RED
-#define STYLE_RESULT     COLOR_BRIGHT_WHITE
-#define STYLE_ERROR_MSG  COLOR_BRIGHT_RED
-
-static uint8_t *load_file(const char *filename, int *plen)
-{
-    FILE *f;
-    uint8_t *buf;
-    int buf_len;
-
-    f = fopen(filename, "rb");
-    if (!f) {
-        perror(filename);
-        exit(1);
-    }
-    fseek(f, 0, SEEK_END);
-    buf_len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    buf = malloc(buf_len + 1);
-    fread(buf, 1, buf_len, f);
-    buf[buf_len] = '\0';
-    fclose(f);
-    if (plen)
-        *plen = buf_len;
-    return buf;
-}
-
-static int js_log_err_flag;
 
 static void js_log_func(void *opaque, const void *buf, size_t buf_len)
 {
@@ -297,7 +256,9 @@ static JSValue run_precompiled(JSContext *ctx, uint8_t *bc, uint32_t bc_len)
 #define CONFIG_BYTECODE_CHECKSUM 1
 #endif
 
-static int slot_is_valid(volatile JsBcSlotHeader *h, uint8_t *image, uint32_t cap)
+/* Returns: 0 = not ready yet, 1 = valid, -1 = error */
+static int slot_check(volatile JsBcSlotHeader *h, uint8_t *image,
+                      uint32_t cap, uint32_t *out_len)
 {
     uint32_t n;
 
@@ -305,17 +266,25 @@ static int slot_is_valid(volatile JsBcSlotHeader *h, uint8_t *image, uint32_t ca
         return 0;
     /* ready is written last; barrier before reading the rest. */
     jsbc_slot_fence();
-    if (h->magic != JSBC_SLOT_MAGIC)
-        return 0;
+    if (h->magic != JSBC_SLOT_MAGIC) {
+        printf("Error: invalid slot magic 0x%08x\n", (unsigned)h->magic);
+        return -1;
+    }
     n = h->length;
-    if (n < sizeof(JSBytecodeHeader) || n > cap)
-        return 0;
+    if (n < sizeof(JSBytecodeHeader) || n > cap) {
+        printf("Error: invalid slot length %u (cap %u)\n", (unsigned)n, (unsigned)cap);
+        return -1;
+    }
 #if CONFIG_BYTECODE_CHECKSUM
-    return jsbc_slot_checksum(image, n) == h->checksum;
+    if (jsbc_slot_checksum(image, n) != h->checksum) {
+        printf("Error: slot checksum mismatch\n");
+        return -1;
+    }
 #else
     (void)image;
-    return 1;
 #endif
+    *out_len = n;
+    return 1;
 }
 
 static JSValue wait_and_run_slot(JSContext *ctx)
@@ -323,6 +292,7 @@ static JSValue wait_and_run_slot(JSContext *ctx)
     volatile JsBcSlotHeader *h;
     uint8_t *image;
     uint32_t cap, spins, bc_len;
+    int status;
 
     cap = (uint32_t)(__jsbytecode_end - __jsbytecode_start);
     if (cap <= JSBC_SLOT_HEADER_SIZE) {
@@ -336,7 +306,15 @@ static JSValue wait_and_run_slot(JSContext *ctx)
     printf("Waiting for bytecode at %p (cap %u bytes)...\n",
            (void *)__jsbytecode_start, (unsigned)cap);
     spins = 0;
-    while (!slot_is_valid(h, image, cap)) {
+    for (;;) {
+        status = slot_check(h, image, cap, &bc_len);
+        if (status > 0)
+            break;
+        if (status < 0) {
+            h->ready = JSBC_SLOT_ERROR;
+            jsbc_slot_fence();
+            return JS_EXCEPTION;
+        }
         spins++;
         if (BYTECODE_WAIT_SPINS && spins >= BYTECODE_WAIT_SPINS) {
             printf("Error: bytecode wait timeout\n");
@@ -349,7 +327,6 @@ static JSValue wait_and_run_slot(JSContext *ctx)
     }
 
     jsbc_slot_fence();
-    bc_len = h->length;
     h->ready = JSBC_SLOT_TAKEN;
     jsbc_slot_fence();
     printf("Loading bytecode at %p (%u bytes)...\n", (void *)image, (unsigned)bc_len);
@@ -419,7 +396,7 @@ int main(int argc, char **argv)
     printf("Context created successfully\n");
 
     /* Set up log function for JS_PrintValueF */
-    // JS_SetLogFunc(ctx, js_log_func);  // Commented out for 32-bit compatibility
+    JS_SetLogFunc(ctx, js_log_func);
 
     printf("Running built-in tests...\n\n");
 
