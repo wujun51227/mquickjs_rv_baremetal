@@ -223,20 +223,54 @@ typedef struct {
 
 static char *heap_ptr;
 
-void *malloc(size_t size) {
-    extern char __heap_start[];
-    extern char __heap_end[];
+#ifndef STACK_MARGIN
+#define STACK_MARGIN 1024
+#endif
 
+/* Linker symbols bound without reserved C identifier prefix */
+extern char heap_start_sym[] __asm__("__heap_start");
+extern char heap_end_sym[] __asm__("__heap_end");
+extern char stack_limit_sym[] __asm__("__stack_limit");
+
+static inline uintptr_t get_stack_pointer(void) {
+    uintptr_t sp;
+    __asm__ volatile ("mv %0, sp" : "=r"(sp));
+    return sp;
+}
+
+static inline uintptr_t get_heap_limit(void) {
+    uintptr_t limit = (uintptr_t)heap_end_sym;
+    if ((uintptr_t)stack_limit_sym != 0 && (uintptr_t)stack_limit_sym < limit) {
+        limit = (uintptr_t)stack_limit_sym;
+    }
+
+    uintptr_t sp = get_stack_pointer();
+    if (sp > STACK_MARGIN) {
+        uintptr_t sp_limit = sp - STACK_MARGIN;
+        if (sp_limit < limit) {
+            limit = sp_limit;
+        }
+    } else {
+        /* Stack exhausted or corrupted */
+        limit = 0;
+    }
+    return limit;
+}
+
+// pi-lens-ignore: identifier
+void *malloc(size_t size) {
     if (heap_ptr == NULL) {
-        heap_ptr = __heap_start;
+        heap_ptr = heap_start_sym;
     }
 
     /* Align to 8 bytes for RV32 */
     uintptr_t cur = ((uintptr_t)heap_ptr + 7) & ~7u;
     size_t total = sizeof(alloc_header_t) + size;
+    uintptr_t limit = get_heap_limit();
 
-    if (cur + total > (uintptr_t)__heap_end || cur + total < cur) {
-        return NULL; /* out of memory or overflow */
+    if (cur < (uintptr_t)heap_start_sym || total < size ||
+        cur + total > limit || cur + total < cur) {
+        return NULL; /* out of memory, stack collision, or overflow */
     }
 
     alloc_header_t *hdr = (alloc_header_t *)cur;
@@ -252,11 +286,11 @@ void free(void *ptr) {
 }
 
 void *realloc(void *ptr, size_t size) {
-    extern char __heap_end[];
     alloc_header_t *old_hdr;
     uintptr_t old_end, new_end;
     void *new_ptr;
     size_t copy_size;
+    uintptr_t limit;
 
     if (!ptr)
         return malloc(size);
@@ -265,11 +299,12 @@ void *realloc(void *ptr, size_t size) {
         return NULL;
     }
 
+    limit = get_heap_limit();
     old_hdr = (alloc_header_t *)ptr - 1;
     old_end = (uintptr_t)old_hdr + sizeof(*old_hdr) + old_hdr->size;
     new_end = (uintptr_t)old_hdr + sizeof(*old_hdr) + size;
     if ((char *)old_end == heap_ptr && new_end >= (uintptr_t)old_hdr &&
-        new_end <= (uintptr_t)__heap_end) {
+        new_end <= limit) {
         old_hdr->size = size;
         heap_ptr = (char *)new_end;
         return ptr;
@@ -506,17 +541,68 @@ static uint64_t read_mcycle(void)
     return ((uint64_t)hi << 32) | lo;
 }
 
+/*
+ * Monotonic cycle accumulator and gettimeofday:
+ * Protect against hardware counter roll-over / reset and enforce strict
+ * monotonicity, preventing clock reversal / jump-back in gettimeofday.
+ */
+static uint64_t read_monotonic_cycles(void)
+{
+    static uint64_t last_raw = 0;
+    static uint64_t cycle_offset = 0;
+
+    uint64_t raw = read_mcycle();
+    if (raw < last_raw) {
+        /*
+         * Counter wrapped or was reset.
+         * If the platform counter only wraps low 32-bits or full 64-bits,
+         * accumulate the missed interval or offset to preserve forward flow.
+         */
+        cycle_offset += (last_raw - raw);
+    }
+    last_raw = raw;
+    return raw + cycle_offset;
+}
+
 int gettimeofday(struct timeval *tv, struct timezone *tz) {
+    static long last_sec = 0;
+    static long last_usec = 0;
     uint64_t cycles, sec, rem;
+    long cur_sec, cur_usec;
 
     (void)tz;
     if (!tv)
         return 0;
-    cycles = read_mcycle();
+
+    if (MCOUNTER_FREQ_HZ == 0) {
+        tv->tv_sec = last_sec;
+        tv->tv_usec = last_usec;
+        return 0;
+    }
+
+    cycles = read_monotonic_cycles();
     sec = cycles / MCOUNTER_FREQ_HZ;
     rem = cycles % MCOUNTER_FREQ_HZ;
-    tv->tv_sec = (long)sec;
-    tv->tv_usec = (long)(rem * 1000000ULL / MCOUNTER_FREQ_HZ);
+
+    /* Prevent signed 32-bit tv_sec overflow (Year 2038 / wrap to negative) */
+    if (sec > 0x7FFFFFFFL) {
+        cur_sec = 0x7FFFFFFFL;
+    } else {
+        cur_sec = (long)sec;
+    }
+    cur_usec = (long)(rem * 1000000ULL / MCOUNTER_FREQ_HZ);
+
+    /* Enforce monotonic time: never let time run backwards */
+    if (cur_sec < last_sec || (cur_sec == last_sec && cur_usec < last_usec)) {
+        cur_sec = last_sec;
+        cur_usec = last_usec;
+    } else {
+        last_sec = cur_sec;
+        last_usec = cur_usec;
+    }
+
+    tv->tv_sec = cur_sec;
+    tv->tv_usec = cur_usec;
     return 0;
 }
 
