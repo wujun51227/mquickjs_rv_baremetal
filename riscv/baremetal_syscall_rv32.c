@@ -40,15 +40,10 @@ struct timezone {
 #define UART_BASE_ADDR 0x10000000
 #endif
 
-/* Simple putchar with 16550 LSR THRE check and CRLF translation */
+/* Simple putchar (direct write to UART_BASE_ADDR for debug device) */
 int putchar(int c) {
     volatile uint8_t *uart = (volatile uint8_t *)UART_BASE_ADDR;
-    if (c == '\n') {
-        while ((uart[5] & 0x20) == 0);
-        uart[0] = '\r';
-    }
-    while ((uart[5] & 0x20) == 0);
-    uart[0] = (uint8_t)c;
+    *uart = (uint8_t)c;
     return c;
 }
 
